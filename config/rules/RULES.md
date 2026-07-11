@@ -1,9 +1,5 @@
 # Rules — 리뷰 규칙의 계보
 
-> `config/rules/RULES.md` placeholder 교체용 초안.
-> ⚠️ 18계명 원문은 Utube_System 리포의 `gemini_reviewer.py`(v22.5) 시스템 프롬프트에 있음 —
-> 공개 인용 시 페르소나 텍스트(실명 포함)는 제거하고 규칙 목록만 발췌할 것.
-
 ## 현재 규칙 — 4대 핵심 규칙 (Core Rules)
 
 | # | 규칙 | 내용 |
