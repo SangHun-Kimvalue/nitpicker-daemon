@@ -1,0 +1,117 @@
+version: '3'
+
+vars:
+  PYTHON: .venv/Scripts/python.exe
+  SRC: src
+  BIN: bin
+  TESTS: tests
+
+tasks:
+  # ============================================================
+  # Development
+  # ============================================================
+  setup:
+    desc: "Create venv and install dependencies"
+    cmds:
+      - python -m venv .venv
+      - "{{.PYTHON}} -m pip install --upgrade pip setuptools wheel"
+      - "{{.PYTHON}} -m pip install -e ."
+    status:
+      - test -f .venv/Scripts/python.exe
+
+  test:
+    desc: "Run full test suite (339 tests)"
+    cmds:
+      - "{{.PYTHON}} -m pytest {{.TESTS}} -v"
+
+  test-quick:
+    desc: "Run tests without verbose output"
+    cmds:
+      - "{{.PYTHON}} -m pytest {{.TESTS}} -q"
+
+  test-phase-i:
+    desc: "Run Phase I tests only (25 tests)"
+    cmds:
+      - "{{.PYTHON}} -m pytest {{.TESTS}}/test_phase_i.py -v"
+
+  test-auto-fix:
+    desc: "Run Auto-Fix tests only (13 tests)"
+    cmds:
+      - "{{.PYTHON}} -m pytest {{.TESTS}}/test_auto_fix.py -v"
+
+  lint:
+    desc: "Run ruff linter"
+    cmds:
+      - "{{.PYTHON}} -m ruff check {{.SRC}} {{.BIN}}"
+    ignore_error: true
+
+  # ============================================================
+  # Layer 1: Mini Nitpicker
+  # ============================================================
+  review:
+    desc: "Run Layer 1 Gemini review on specific files"
+    cmds:
+      - "{{.PYTHON}} {{.BIN}}/mini_nitpicker.py {{.CLI_ARGS}}"
+    vars:
+      CLI_ARGS: '{{default "--staged" .CLI_ARGS}}'
+
+  review-staged:
+    desc: "Review git staged files"
+    cmds:
+      - "{{.PYTHON}} {{.BIN}}/mini_nitpicker.py --staged"
+
+  auto-fix:
+    desc: "Review + auto-apply patches (git apply)"
+    env:
+      NITPICKER_AUTO_APPLY: "1"
+    cmds:
+      - "{{.PYTHON}} {{.BIN}}/mini_nitpicker.py {{.CLI_ARGS}}"
+
+  # ============================================================
+  # Layer 2: Orchestrator
+  # ============================================================
+  run-cli:
+    desc: "Run Layer 2 orchestrator CLI"
+    cmds:
+      - "{{.PYTHON}} {{.BIN}}/jemmin_cli.py {{.CLI_ARGS}}"
+
+  stats:
+    desc: "Show DuckDB analytics summary"
+    cmds:
+      - "{{.PYTHON}} {{.BIN}}/jemmin_cli.py --stats"
+
+  # ============================================================
+  # Daemons
+  # ============================================================
+  daemon:
+    desc: "Start Layer 1 file watcher daemon"
+    cmds:
+      - "{{.PYTHON}} {{.BIN}}/mini_nitpicker_daemon.py"
+
+  daemon-l2:
+    desc: "Start Layer 2 orchestrator daemon (ZMQ IPC)"
+    cmds:
+      - "{{.PYTHON}} {{.BIN}}/jemmin_daemon.py"
+
+  lsp:
+    desc: "Start LSP server (stdio)"
+    cmds:
+      - "{{.PYTHON}} {{.BIN}}/jemmin_lsp.py"
+
+  # ============================================================
+  # Deployment & Packaging
+  # ============================================================
+  build:
+    desc: "Build distribution packages"
+    cmds:
+      - "{{.PYTHON}} -m pip install build"
+      - "{{.PYTHON}} -m build"
+
+  check-deploy:
+    desc: "Verify deployment readiness"
+    cmds:
+      - "{{.PYTHON}} -m pytest {{.TESTS}} -q"
+      - "{{.PYTHON}} -c \"from jemmin.mini_reviewer import load_settings; print('Settings module: OK')\""
+      - "{{.PYTHON}} -c \"from jemmin.orchestrator.controller import ReviewOrchestrator; print('Orchestrator module: OK')\""
+      - "{{.PYTHON}} -c \"import zmq; print(f'ZeroMQ: OK (v{zmq.zmq_version()})')\""
+      - echo "All deployment checks passed."

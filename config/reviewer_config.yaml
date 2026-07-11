@@ -1,0 +1,29 @@
+default_profile: general
+cloud_offload: false
+auto_apply: false
+max_file_size_bytes: 1048576
+token_budget: 200000
+debounce_ms: 1500
+model: gemini-3.1-pro-preview
+model_fallback: gemini-2.0-flash
+
+# ── Provider 설정 (Phase IV: Tiered Routing) ──────────────────────
+# default: 단일 provider 모드에서 사용할 기본 provider
+#   - "mock"   : MockLocalLLMProvider (테스트/개발용)
+#   - "ollama" : OllamaProvider (로컬 LLM, API 비용 0원)
+#   - "gemini" : GeminiProvider (클라우드 LLM, API 비용 발생)
+#
+# tiers: cost_class별 provider 매핑 (Tiered Routing 활성화 시)
+#   - free: null      → regex/AST/tool 기반 에이전트, LLM 불필요
+#   - medium: ollama   → patch/verification 에이전트, 로컬 LLM 사용
+#   - high: ollama     → 고정밀 에이전트도 로컬 LLM 사용
+provider:
+  default: ollama
+  ollama_model: qwen2.5-coder:7b
+  ollama_base_url: http://localhost:11434
+  gemini_model: gemini-3.1-pro-preview
+  gemini_fallback_model: gemini-2.0-flash
+  tiers:
+    free: null
+    medium: ollama
+    high: ollama

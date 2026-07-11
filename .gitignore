@@ -1,0 +1,25 @@
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+.venv/
+.jemmin/
+*.egg-info/
+config/nitpicker.local.json
+
+*.db
+*.db-shm
+*.db-wal
+*.jsonl
+LATEST_REVIEW.txt
+_run_gemini_review.py
+
+# Excluded from the public portfolio mirror: local tooling and internal notes.
+Docs/
+.claude/
+.vscode/

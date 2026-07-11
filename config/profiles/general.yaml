@@ -1,0 +1,4 @@
+name: general
+cloud_offload: false
+auto_apply: false
+deep_review: manual

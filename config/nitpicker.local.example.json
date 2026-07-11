@@ -1,0 +1,31 @@
+{
+  // LLM provider 선택: "ollama"(기본, 로컬 무료) | "gemini"(API, 크레딧 필요)
+  // env NITPICKER_PROVIDER 로도 덮어쓸 수 있습니다.
+  "provider": "ollama",
+  // provider=ollama일 때 사용할 로컬 모델 (env OLLAMA_MODEL)
+  "ollama_model": "qwen2.5-coder:7b",
+  // Ollama 서버 주소 (env OLLAMA_BASE_URL)
+  "ollama_base_url": "http://localhost:11434",
+  // 아래 gemini_* 키는 provider="gemini"일 때만 필수입니다.
+  "gemini_api_key": "replace-with-real-key",
+  "gemini_model": "gemini-3.1-pro-preview",
+  "gemini_fallback_model": "gemini-2.0-flash",
+  "watch_path": "src",
+  "debounce_seconds": 2.0,
+  "file_extensions": [
+    ".py",
+    ".cpp",
+    ".h",
+    ".hpp"
+  ],
+  // true로 설정하면 API 호출 없이 리뷰를 건너뜁니다 (NITPICKER_SKIP=1 env var과 동일)
+  "skip": false,
+  // true로 설정하면 PATCH_PROPOSED 시 git apply로 자동 적용합니다 (NITPICKER_AUTO_APPLY=1 env var과 동일)
+  "auto_apply_patches": false,
+  // Windows 토스트 알림 활성화 (true/false)
+  "toast_enabled": true,
+  // Webhook URL (Slack, Discord, 또는 범용 서버)
+  "webhook_url": "",
+  // Webhook format: "slack" | "discord" | "generic"
+  "webhook_format": "slack"
+}
