@@ -10,7 +10,7 @@
 | 동작 방식 | 파일 저장 → watchdog 감지 → `git diff` → LLM 리뷰 → 구조화 JSON 판정 |
 | 판정 체계 | `REVIEW_PASSED` / `PATCH_PROPOSED`(unified diff 포함) / `REVIEW_REJECTED` |
 | 강제 규칙 | Fail-Fast · Hot-path I/O 금지 · Strict Typing · Concurrency Safety (4대 핵심 규칙) |
-| 테스트 | pytest 기반 단위·동시성·엣지케이스·sad-path 시나리오 포함 |
+| 테스트 | pytest 511+ 테스트 — 단위·동시성·엣지케이스·sad-path 시나리오 포함 |
 | 프로바이더 | Gemini API · Ollama(로컬 LLM) · Mock — adapter 경계로 교체 가능 |
 | 감사 추적 | append-only JSONL 로그 + 최신 리뷰 아티팩트(txt/json) |
 
@@ -38,9 +38,7 @@ flowchart TD
     E -.Loop-until-Pass.-> G["에이전트 워크플로<br/>패치 적용 → 테스트 → 재리뷰 반복"]
 ```
 
-**Layer 2 (오케스트레이터, 진행 중)**: 역할별 에이전트(fast_gate·security·architecture·performance 등 9종),
-ConsensusEngine(투표 집계), ResourceManager(동시 실행 예산), SQLite 작업 영속화, ZeroMQ IPC — 
-단일 리뷰어를 다중 에이전트 합의 구조로 확장하는 스캐폴드가 구현되어 있습니다. (완료 항목/진행 항목은 로드맵 참조)
+**3-Layer 파이프라인**: L1(파일 감시 + 단일 LLM 호출의 빠른 리뷰) → L2(AST/정적분석 기반 10개 서브 에이전트 무료 프리필터, 0.01s — REJECT면 LLM 호출 없이 종료) → L3(L2 통과 코드에 한한 LLM 최종 리뷰). ConsensusEngine(투표 집계)·ResourceManager(동시 실행 예산)·SQLite 작업 영속화·ZeroMQ IPC·토스트/웹훅 알림·DuckDB 리포트를 포함합니다.
 
 ## 설계 원칙
 
