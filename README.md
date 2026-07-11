@@ -10,7 +10,7 @@
 | 동작 방식 | 파일 저장 → watchdog 감지 → `git diff` → LLM 리뷰 → 구조화 JSON 판정 |
 | 판정 체계 | `REVIEW_PASSED` / `PATCH_PROPOSED`(unified diff 포함) / `REVIEW_REJECTED` |
 | 강제 규칙 | Fail-Fast · Hot-path I/O 금지 · Strict Typing · Concurrency Safety (4대 핵심 규칙) |
-| 테스트 | pytest 39/39 통과 (동시성·엣지케이스·sad-path 포함) |
+| 테스트 | pytest 기반 단위·동시성·엣지케이스·sad-path 시나리오 포함 |
 | 프로바이더 | Gemini API · Ollama(로컬 LLM) · Mock — adapter 경계로 교체 가능 |
 | 감사 추적 | append-only JSONL 로그 + 최신 리뷰 아티팩트(txt/json) |
 
@@ -59,7 +59,7 @@ copy config\nitpicker.local.example.json config\nitpicker.local.json
 Set_Env.bat && Run_Daemon.bat
 
 # 3. 테스트
-Run_Tests.bat   # pytest 39/39
+Run_Tests.bat   # pytest 실행
 ```
 
 ## 기술 스택
