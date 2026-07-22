@@ -51,6 +51,14 @@ def _exit_code_from_result_code(result_code: str | None) -> int:
     return 0 if result_code == "REVIEW_PASSED" else 1
 
 
+def _emit_result_code(result_code: str | None) -> str:
+    """Stable result code를 downstream용 단일 machine token으로 출력한다."""
+    code = result_code if result_code else "UNKNOWN"
+    token = f"JEMMIN_RESULT_CODE={code}"
+    print(token)
+    return token
+
+
 def _exit_code_from_result(result: ReviewResult) -> int:
     return _exit_code_from_result_code(result.result_code)
 
@@ -199,7 +207,9 @@ def _run_via_daemon(file_path: str, diff_text: str) -> int:
         if response.get("status") == "success":
             result = response["response"]
             print(f"{result.get('state')} {result.get('status')} {result.get('summary')}")
-            return 0
+            result_code = result.get("result_code")
+            _emit_result_code(result_code)
+            return _exit_code_from_result_code(result_code)
         print(f"[jemmin_cli] 데몬 오류: {response.get('error_message')}", file=sys.stderr)
         return 1
     except (TimeoutError, ConnectionError) as error:
@@ -287,6 +297,7 @@ def _run_direct(
         request.metadata["reviewer"] = reviewer_label
         result = orchestrator.run_once(request)
         print(result.state.value, result.status, result.summary)
+        _emit_result_code(result.result_code)
         return _exit_code_from_result(result)
     finally:
         if analytics_logger is not None:

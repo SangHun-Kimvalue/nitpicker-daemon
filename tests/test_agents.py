@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 import textwrap
@@ -283,6 +284,173 @@ class TestArchScan:
         """)
         findings = arch_scan(self._diff(code))
         assert any(f["code"] == "ARCH001" for f in findings)
+
+    @pytest.mark.parametrize(
+        ("added", "expected_code"),
+        [
+            ("for item in items:\n    requests.get(item)", "ARCH001"),
+            ("for row in rows:\n    while row.pending:\n        cursor.execute(row.sql)", "ARCH001"),
+            ("while ready:\n    import optional_module", "ARCH002"),
+            ("for item in items:\n    while item.pending:\n        import optional_module", "ARCH002"),
+        ],
+    )
+    def test_loop_rules_detect_top_level_and_nested_body(self, added, expected_code):
+        codes = {finding["code"] for finding in arch_scan(self._diff(added))}
+        assert expected_code in codes
+
+    @pytest.mark.parametrize(
+        "added",
+        [
+            "if ready:\n    for item in items:\n    requests.get(item)",
+            "for item in items:\n    # requests.get(item)",
+            "for item in items:\n    # import optional_module",
+            "for item in items:\n    from optional_module import value",
+        ],
+    )
+    def test_loop_rules_ignore_sibling_comment_and_from_import(self, added):
+        codes = {finding["code"] for finding in arch_scan(self._diff(added))}
+        assert "ARCH001" not in codes
+        assert "ARCH002" not in codes
+
+    def test_blank_line_keeps_loop_stack(self):
+        codes = {
+            finding["code"]
+            for finding in arch_scan(self._diff("for item in items:\n\n    open(item)"))
+        }
+        assert "ARCH001" in codes
+
+    @pytest.mark.parametrize(
+        ("body", "expected_code"),
+        [
+            ("\trequests.get(item)", "ARCH001"),
+            ("\timport optional_module", "ARCH002"),
+        ],
+    )
+    def test_tab_indented_loop_body(self, body, expected_code):
+        codes = {
+            finding["code"]
+            for finding in arch_scan(self._diff(f"for item in items:\n{body}"))
+        }
+        assert expected_code in codes
+
+    def test_mixed_indentation_uses_visual_columns_for_same_indent_sibling(self):
+        added = "if ready:\n\tfor item in items:\n        requests.get(item)"
+        codes = {finding["code"] for finding in arch_scan(self._diff(added))}
+        assert "ARCH001" not in codes
+        assert "ARCH002" not in codes
+
+    def test_hunk_boundary_resets_loop_stack(self):
+        diff = (
+            "--- a/file.py\n+++ b/file.py\n"
+            "@@ -1 +1 @@\n+for item in items:\n"
+            "@@ -20 +20 @@\n+    requests.get(item)\n+    import optional_module\n"
+        )
+        codes = {finding["code"] for finding in arch_scan(diff)}
+        assert "ARCH001" not in codes
+        assert "ARCH002" not in codes
+        assert self._legacy_loop_codes("for item in items:\n    requests.get(item)\n    import optional_module") == {
+            "ARCH001",
+            "ARCH002",
+        }
+
+    @staticmethod
+    def _legacy_loop_codes(added: str) -> set[str]:
+        patterns = {
+            "ARCH001": re.compile(
+                r"^\s*(for|while)\b[^\r\n]*:\s*[\r\n]+"
+                r"(?:[^\S\r\n]+[^\r\n]*[\r\n]+)*?"
+                r"[^\S\r\n]+[^\r\n]*(open\(|requests\.|httpx\.|aiohttp\.|sqlite3\.|cursor\.execute)",
+                re.MULTILINE,
+            ),
+            "ARCH002": re.compile(
+                r"(for|while)\s+.+:\s*[\r\n]+(?:[^\S\r\n]+.*[\r\n]+)*[^\S\r\n]+import\s"
+            ),
+        }
+        return {code for code, pattern in patterns.items() if pattern.search(added)}
+
+    @pytest.mark.parametrize(
+        ("name", "added", "expected_new", "relation"),
+        [
+            ("io_body", "for x in xs:\n    open(x)", {"ARCH001"}, "preserved"),
+            ("import_body", "while ready:\n    import optional", {"ARCH002"}, "preserved"),
+            ("same_indent", "if ready:\n    for x in xs:\n    requests.get(x)", set(), "intentional_delta"),
+            ("comment", "for x in xs:\n    # requests.get(x)", set(), "intentional_delta"),
+        ],
+    )
+    def test_legacy_differential_small_fixtures(self, name, added, expected_new, relation):
+        del name
+        legacy = self._legacy_loop_codes(added)
+        current = {
+            finding["code"]
+            for finding in arch_scan(self._diff(added))
+            if finding["code"] in {"ARCH001", "ARCH002"}
+        }
+        assert current == expected_new
+        if relation == "preserved":
+            assert current == legacy
+        else:
+            assert legacy and not current
+
+    @pytest.mark.parametrize(
+        "pattern_source",
+        [
+            (
+                r"^\s*(for|while)\b[^\r\n]*:\s*[\r\n]+"
+                r"(?:[^\S\r\n]+[^\r\n]*[\r\n]+)*?"
+                r"[^\S\r\n]+[^\r\n]*(open\(|requests\.|httpx\.|aiohttp\.|sqlite3\.|cursor\.execute)"
+            ),
+            r"(for|while)\s+.+:\s*[\r\n]+(?:[^\S\r\n]+.*[\r\n]+)*[^\S\r\n]+import\s",
+        ],
+    )
+    def test_frozen_legacy_loop_regex_exceeds_hard_cap(self, pattern_source):
+        added = "for item in items:\n" + "\n".join(
+            f"    value_{index} = item" for index in range(11)
+        )
+        script = (
+            "import re, sys\n"
+            "pattern = re.compile(sys.argv[1], re.MULTILINE)\n"
+            "pattern.search(sys.argv[2])\n"
+        )
+        with pytest.raises(subprocess.TimeoutExpired):
+            subprocess.run(
+                [sys.executable, "-c", script, pattern_source, added],
+                check=False,
+                timeout=1.0,
+            )
+
+    def test_bounded_scanner_finishes_long_clean_fixture_in_child(self):
+        added = "for item in items:\n" + "\n".join(
+            f"    value_{index} = item" for index in range(11)
+        )
+        diff = self._diff(added)
+        script = (
+            "import sys\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "from jemmin.agents.architecture import _scan_diff\n"
+            "codes = {finding['code'] for finding in _scan_diff(sys.argv[2])}\n"
+            "raise SystemExit(1 if {'ARCH001', 'ARCH002'} & codes else 0)\n"
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", script, str(ROOT / "src"), diff],
+            cwd=ROOT,
+            check=False,
+            timeout=2,
+        )
+        assert completed.returncode == 0
+
+    @pytest.mark.parametrize(
+        ("added", "expected_code"),
+        [
+            ("try:\n    risky()\nexcept Exception:\n    pass", "ARCH003"),
+            ("try:\n    risky()\nexcept:\n    pass", "ARCH004"),
+            ("print('debug')", "ARCH005"),
+            ("CACHE: list = []", "ARCH006"),
+            ("def public_api():\n    return 1\n" + "\n".join(f"x_{i} = {i}" for i in range(20)), "ARCH007"),
+        ],
+    )
+    def test_non_loop_architecture_rules_are_preserved(self, added, expected_code):
+        codes = {finding["code"] for finding in arch_scan(self._diff(added))}
+        assert expected_code in codes
 
     def test_bare_except_pass(self):
         code = textwrap.dedent("""\

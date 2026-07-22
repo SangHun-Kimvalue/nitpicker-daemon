@@ -28,7 +28,25 @@ def test_exit_code_mapping_fails_closed(result_code: str | None, expected: int) 
     assert jemmin_cli._exit_code_from_result_code(result_code) == expected
 
 
-def test_run_direct_returns_nonzero_for_security_reject(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("result_code", "expected_token"),
+    [
+        ("REVIEW_PASSED", "JEMMIN_RESULT_CODE=REVIEW_PASSED"),
+        ("REVIEW_REJECTED", "JEMMIN_RESULT_CODE=REVIEW_REJECTED"),
+        ("DUPLICATE_REQUEST_IGNORED", "JEMMIN_RESULT_CODE=DUPLICATE_REQUEST_IGNORED"),
+        (None, "JEMMIN_RESULT_CODE=UNKNOWN"),
+    ],
+)
+def test_emit_result_code_prints_exact_single_token(
+    result_code: str | None,
+    expected_token: str,
+    capsys,
+) -> None:
+    assert jemmin_cli._emit_result_code(result_code) == expected_token
+    assert capsys.readouterr().out.splitlines() == [expected_token]
+
+
+def test_run_direct_returns_nonzero_for_security_reject(tmp_path, monkeypatch, capsys) -> None:
     monkeypatch.setattr(jemmin_cli, "ROOT", tmp_path)
     monkeypatch.setattr(
         jemmin_cli,
@@ -48,11 +66,14 @@ def test_run_direct_returns_nonzero_for_security_reject(tmp_path, monkeypatch) -
     rc = jemmin_cli._run_direct("secret.py", diff, provider_name="mock")
 
     assert rc == 1
+    stdout = capsys.readouterr().out
+    assert "delivered rejected" in stdout
+    assert stdout.splitlines().count("JEMMIN_RESULT_CODE=REVIEW_REJECTED") == 1
     latest = tmp_path / ".jemmin" / "logs" / "LATEST_REVIEW.txt"
     assert "결과 코드: REVIEW_REJECTED" in latest.read_text(encoding="utf-8")
 
 
-def test_run_direct_returns_zero_for_review_passed(tmp_path, monkeypatch) -> None:
+def test_run_direct_returns_zero_for_review_passed(tmp_path, monkeypatch, capsys) -> None:
     monkeypatch.setattr(jemmin_cli, "ROOT", tmp_path)
     monkeypatch.setattr(
         jemmin_cli,
@@ -72,8 +93,106 @@ def test_run_direct_returns_zero_for_review_passed(tmp_path, monkeypatch) -> Non
     rc = jemmin_cli._run_direct("ok.py", diff, provider_name="mock")
 
     assert rc == 0
+    stdout = capsys.readouterr().out
+    assert "delivered pass" in stdout
+    assert stdout.splitlines().count("JEMMIN_RESULT_CODE=REVIEW_PASSED") == 1
     latest = tmp_path / ".jemmin" / "logs" / "LATEST_REVIEW.txt"
     assert "결과 코드: REVIEW_PASSED" in latest.read_text(encoding="utf-8")
+
+
+def test_run_direct_duplicate_emits_machine_code_once(tmp_path, monkeypatch, capsys) -> None:
+    monkeypatch.setattr(jemmin_cli, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        jemmin_cli,
+        "_LOCAL_CONFIG_PATH",
+        tmp_path / "config" / "nitpicker.local.json",
+    )
+
+    assert jemmin_cli._run_direct("ok.py", "+value = 42\n", provider_name="mock") == 0
+    capsys.readouterr()
+
+    rc = jemmin_cli._run_direct("ok.py", "+value = 42\n", provider_name="mock")
+
+    assert rc == 1
+    stdout = capsys.readouterr().out
+    assert "delivered ignored" in stdout
+    assert stdout.splitlines().count("JEMMIN_RESULT_CODE=DUPLICATE_REQUEST_IGNORED") == 1
+
+
+@pytest.mark.parametrize(
+    ("result_code", "expected_exit", "expected_token"),
+    [
+        ("REVIEW_PASSED", 0, "JEMMIN_RESULT_CODE=REVIEW_PASSED"),
+        ("REVIEW_REJECTED", 1, "JEMMIN_RESULT_CODE=REVIEW_REJECTED"),
+        ("DUPLICATE_REQUEST_IGNORED", 1, "JEMMIN_RESULT_CODE=DUPLICATE_REQUEST_IGNORED"),
+        (None, 1, "JEMMIN_RESULT_CODE=UNKNOWN"),
+        ("NEW_RESULT_CODE", 1, "JEMMIN_RESULT_CODE=NEW_RESULT_CODE"),
+    ],
+)
+def test_run_via_daemon_uses_result_code_gate(
+    monkeypatch,
+    capsys,
+    result_code: str | None,
+    expected_exit: int,
+    expected_token: str,
+) -> None:
+    class FakeClient:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback) -> None:
+            return None
+
+        def send(self, payload):
+            return {
+                "status": "success",
+                "response": {
+                    "state": "delivered",
+                    "status": "pass" if result_code == "REVIEW_PASSED" else "ignored",
+                    "summary": "human summary",
+                    "result_code": result_code,
+                },
+            }
+
+    monkeypatch.setattr(jemmin_cli, "ZmqClient", FakeClient)
+
+    rc = jemmin_cli._run_via_daemon("ok.py", "+value = 42\n")
+
+    assert rc == expected_exit
+    stdout = capsys.readouterr().out
+    assert "delivered" in stdout and "human summary" in stdout
+    assert stdout.splitlines().count(expected_token) == 1
+
+
+def test_run_via_daemon_error_has_no_result_code_token(monkeypatch, capsys) -> None:
+    class FakeClient:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback) -> None:
+            return None
+
+        def send(self, payload):
+            return {
+                "status": "error",
+                "error_message": "daemon rejected request",
+            }
+
+    monkeypatch.setattr(jemmin_cli, "ZmqClient", FakeClient)
+
+    rc = jemmin_cli._run_via_daemon("ok.py", "+value = 42\n")
+
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "daemon rejected request" in captured.err
+    assert "JEMMIN_RESULT_CODE=" not in captured.out
+    assert "JEMMIN_RESULT_CODE=" not in captured.err
 
 
 def test_run_direct_uses_runtime_dir_override(tmp_path, monkeypatch) -> None:

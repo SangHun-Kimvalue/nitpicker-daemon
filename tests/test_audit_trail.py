@@ -64,7 +64,8 @@ class AuditTrailTests(unittest.TestCase):
             finally:
                 connection.close()
 
-            event_types = [row[0] for row in rows]
+            lifecycle_types = {"review.request", "review.state_changed", "review.terminal"}
+            event_types = [row[0] for row in rows if row[0] in lifecycle_types]
             self.assertEqual(
                 event_types,
                 [
@@ -108,6 +109,23 @@ class AuditTrailTests(unittest.TestCase):
                     "REVIEW_PASSED",
                 ],
             )
+
+            stage_payloads = [
+                json.loads(payload_json)
+                for event_type, payload_json in rows
+                if event_type == "review.stage"
+            ]
+            self.assertEqual(
+                [(payload["stage"], payload["phase"], payload["result_code"]) for payload in stage_payloads],
+                [
+                    ("agent", "started", "AGENT_STARTED"),
+                    ("agent", "completed", "AGENT_COMPLETED"),
+                ],
+            )
+            self.assertEqual(stage_payloads[0]["agent_name"], "fast_gate")
+            self.assertEqual(stage_payloads[0]["ordinal"], 1)
+            self.assertEqual(stage_payloads[0]["total"], 1)
+            self.assertEqual(stage_payloads[1]["status"], "pass")
 
 
 if __name__ == "__main__":

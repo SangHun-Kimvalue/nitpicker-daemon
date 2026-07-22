@@ -67,6 +67,32 @@ class ReviewOrchestrator:
         """하위 호환 — 기존 테스트가 _analytics_logger에 직접 접근하는 경우 대비."""
         return self._publisher._analytics
 
+    def _record_stage_event_best_effort(
+        self,
+        request_id: str,
+        *,
+        stage: str,
+        phase: str,
+        result_code: str,
+        **details: Any,
+    ) -> None:
+        payload = {
+            "stage": stage,
+            "phase": phase,
+            "result_code": result_code,
+            **details,
+        }
+        try:
+            self._job_store.append_event(request_id, "review.stage", payload)
+        except Exception as error:
+            logging.warning(
+                "[Orchestrator] Failed to record stage %s/%s for %s: %s",
+                stage,
+                phase,
+                request_id,
+                error,
+            )
+
     def run_once(self, request: ReviewRequest) -> ReviewResult:
         """
         동기 기반의 리뷰 파이프라인.
@@ -230,7 +256,51 @@ class ReviewOrchestrator:
                 or getattr(a, "name", None) in decision.allowed_agents
             ]
             t_agents_start = time.monotonic()
-            decisions = [agent.run(request, context) for agent in active_agents]
+            decisions: list[AgentDecision] = []
+            total_agents = len(active_agents)
+            for ordinal, agent in enumerate(active_agents, start=1):
+                agent_name = getattr(agent, "name", None)
+                if not isinstance(agent_name, str) or not agent_name:
+                    agent_name = agent.__class__.__name__
+                self._record_stage_event_best_effort(
+                    request.request_id,
+                    stage="agent",
+                    phase="started",
+                    result_code="AGENT_STARTED",
+                    agent_name=agent_name,
+                    ordinal=ordinal,
+                    total=total_agents,
+                )
+                t_agent_start = time.monotonic()
+                try:
+                    agent_decision = agent.run(request, context)
+                except Exception as error:
+                    agent_latency_ms = (time.monotonic() - t_agent_start) * 1000
+                    self._record_stage_event_best_effort(
+                        request.request_id,
+                        stage="agent",
+                        phase="failed",
+                        result_code="AGENT_FAILED",
+                        agent_name=agent_name,
+                        ordinal=ordinal,
+                        total=total_agents,
+                        latency_ms=agent_latency_ms,
+                        exception_type=type(error).__name__,
+                    )
+                    raise
+                agent_latency_ms = (time.monotonic() - t_agent_start) * 1000
+                decisions.append(agent_decision)
+                self._record_stage_event_best_effort(
+                    request.request_id,
+                    stage="agent",
+                    phase="completed",
+                    result_code="AGENT_COMPLETED",
+                    agent_name=agent_name,
+                    ordinal=ordinal,
+                    total=total_agents,
+                    latency_ms=agent_latency_ms,
+                    status=agent_decision.status,
+                )
             latency_ms = (time.monotonic() - t_agents_start) * 1000
             self._publisher.log_analytics(
                 request.request_id,
@@ -265,8 +335,33 @@ class ReviewOrchestrator:
                 )
                 t_l3_start = time.monotonic()
                 all_findings_for_l3 = self._collect_findings(decisions)
-                llm_result = self._llm_review_gate.review(request, context, all_findings_for_l3)
+                self._record_stage_event_best_effort(
+                    request.request_id,
+                    stage="l3",
+                    phase="started",
+                    result_code="L3_STARTED",
+                )
+                try:
+                    llm_result = self._llm_review_gate.review(request, context, all_findings_for_l3)
+                except Exception as error:
+                    l3_latency_ms = (time.monotonic() - t_l3_start) * 1000
+                    self._record_stage_event_best_effort(
+                        request.request_id,
+                        stage="l3",
+                        phase="failed",
+                        result_code="L3_FAILED",
+                        latency_ms=l3_latency_ms,
+                        exception_type=type(error).__name__,
+                    )
+                    raise
                 l3_latency_ms = (time.monotonic() - t_l3_start) * 1000
+                self._record_stage_event_best_effort(
+                    request.request_id,
+                    stage="l3",
+                    phase="completed",
+                    result_code="L3_COMPLETED",
+                    latency_ms=l3_latency_ms,
+                )
                 l3_code = llm_result.get("result_code", "REVIEW_PASSED")
                 self._publisher.log_analytics(
                     request.request_id,

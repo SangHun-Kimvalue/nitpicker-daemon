@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, Mock
 import pytest
 
 from jemmin.agents.fast_gate import FastGateAgent
-from jemmin.models import ReviewRequest, ReviewState
+from jemmin.models import AgentDecision, ReviewRequest, ReviewState
 from jemmin.orchestrator.consensus import DefaultConsensusEngine
 from jemmin.orchestrator.controller import ReviewOrchestrator
 from jemmin.orchestrator.policy_engine import PolicyDecision
@@ -129,7 +129,20 @@ def get_audit_rows(store: SQLiteJobStore, request_id: str):
 
 
 def get_audit_trail(store: SQLiteJobStore, request_id: str) -> list[str]:
-    return [row["event_type"] for row in get_audit_rows(store, request_id)]
+    lifecycle_types = {"review.request", "review.state_changed", "review.terminal", "review.duplicate_ignored"}
+    return [
+        row["event_type"]
+        for row in get_audit_rows(store, request_id)
+        if row["event_type"] in lifecycle_types
+    ]
+
+
+def get_stage_payloads(store: SQLiteJobStore, request_id: str) -> list[dict]:
+    return [
+        json.loads(row["payload_json"])
+        for row in get_audit_rows(store, request_id)
+        if row["event_type"] == "review.stage"
+    ]
 
 
 def get_state_transitions(store: SQLiteJobStore, request_id: str) -> list[str]:
@@ -207,6 +220,11 @@ def test_agent_timeout_degraded_flow(orchestrator, orchestrator_deps, dummy_requ
     terminal_payload = get_terminal_payload(store, dummy_request.request_id)
     assert terminal_payload["state"] == ReviewState.DEGRADED.value
     assert terminal_payload["result_code"] == "LLM_TIMEOUT"
+    stages = get_stage_payloads(store, dummy_request.request_id)
+    assert [stage["phase"] for stage in stages] == ["started", "failed"]
+    assert [stage["result_code"] for stage in stages] == ["AGENT_STARTED", "AGENT_FAILED"]
+    assert stages[-1]["exception_type"] == "TimeoutError"
+    assert not any(stage["phase"] == "completed" for stage in stages)
 
 
 def test_fatal_system_error_flow(orchestrator, orchestrator_deps, dummy_request, store: SQLiteJobStore):
@@ -240,6 +258,103 @@ def test_happy_path_audit_trail(orchestrator, dummy_request, store: SQLiteJobSto
     terminal_payload = get_terminal_payload(store, dummy_request.request_id)
     assert terminal_payload["state"] == ReviewState.DELIVERED.value
     assert terminal_payload["result_code"] == "REVIEW_PASSED"
+
+
+def test_agent_stage_order_and_existing_aggregate_analytics_are_preserved(
+    orchestrator_deps, dummy_request, store: SQLiteJobStore
+):
+    first = Mock()
+    first.name = "first"
+    first.run.return_value = AgentDecision("first", "pass", 0.9, [], [])
+    second = Mock()
+    second.name = "second"
+    second.run.return_value = AgentDecision("second", "warn", 0.7, [{"code": "X"}], [])
+    analytics = MagicMock()
+    orchestrator_deps["agents"] = [first, second]
+    orchestrator_deps["analytics_logger"] = analytics
+    orchestrator = ReviewOrchestrator(**orchestrator_deps)
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        timestamps = iter([10.0, 11.0, 12.0, 13.0, 14.0, 15.0])
+        monkeypatch.setattr("jemmin.orchestrator.controller.time.monotonic", lambda: next(timestamps))
+        result = orchestrator.run_once(dummy_request)
+
+    assert result.result_code == "REVIEW_PASSED"
+    stages = get_stage_payloads(store, dummy_request.request_id)
+    assert [(stage["agent_name"], stage["phase"]) for stage in stages] == [
+        ("first", "started"),
+        ("first", "completed"),
+        ("second", "started"),
+        ("second", "completed"),
+    ]
+    assert [stage["ordinal"] for stage in stages] == [1, 1, 2, 2]
+    assert all(stage["total"] == 2 for stage in stages)
+    assert [stage.get("status") for stage in stages] == [None, "pass", None, "warn"]
+
+    agents_run = [
+        call.args[0]
+        for call in analytics.write.call_args_list
+        if call.args[0]["event_type"] == "agents_run"
+    ]
+    assert agents_run == [{
+        "request_id": dummy_request.request_id,
+        "event_type": "agents_run",
+        "status": "done",
+        "agent_name": "",
+        "latency_ms": 5000.0,
+        "findings_cnt": 1,
+        "result_code": "",
+        "confidence_score": 0.0,
+    }]
+
+
+def test_l3_stage_success_sequence(orchestrator_deps, dummy_request, store: SQLiteJobStore):
+    gate = Mock()
+    gate.review.return_value = {"result_code": "REVIEW_PASSED", "summary": "L3 pass"}
+    orchestrator_deps["llm_review_gate"] = gate
+
+    result = ReviewOrchestrator(**orchestrator_deps).run_once(dummy_request)
+
+    assert result.result_code == "REVIEW_PASSED"
+    l3_stages = [stage for stage in get_stage_payloads(store, dummy_request.request_id) if stage["stage"] == "l3"]
+    assert [stage["phase"] for stage in l3_stages] == ["started", "completed"]
+    assert [stage["result_code"] for stage in l3_stages] == ["L3_STARTED", "L3_COMPLETED"]
+    assert "latency_ms" not in l3_stages[0]
+    assert l3_stages[1]["latency_ms"] >= 0
+
+
+def test_l3_stage_failure_preserves_primary_result(orchestrator_deps, dummy_request, store: SQLiteJobStore):
+    gate = Mock()
+    gate.review.side_effect = TimeoutError("L3 timed out")
+    orchestrator_deps["llm_review_gate"] = gate
+
+    result = ReviewOrchestrator(**orchestrator_deps).run_once(dummy_request)
+
+    assert result.state == ReviewState.DEGRADED
+    assert result.result_code == "LLM_TIMEOUT"
+    l3_stages = [stage for stage in get_stage_payloads(store, dummy_request.request_id) if stage["stage"] == "l3"]
+    assert [stage["phase"] for stage in l3_stages] == ["started", "failed"]
+    assert l3_stages[-1]["result_code"] == "L3_FAILED"
+    assert l3_stages[-1]["exception_type"] == "TimeoutError"
+
+
+@pytest.mark.parametrize("failure_stage", ["agent", "l3"])
+def test_stage_persistence_failure_does_not_mask_primary_timeout(
+    failure_stage, orchestrator_deps, dummy_request, store: SQLiteJobStore
+):
+    store.append_event = Mock(side_effect=RuntimeError("stage persistence unavailable"))
+    if failure_stage == "agent":
+        orchestrator_deps["agents"][0].run.side_effect = TimeoutError("agent primary timeout")
+    else:
+        gate = Mock()
+        gate.review.side_effect = TimeoutError("L3 primary timeout")
+        orchestrator_deps["llm_review_gate"] = gate
+
+    result = ReviewOrchestrator(**orchestrator_deps).run_once(dummy_request)
+
+    assert result.state == ReviewState.DEGRADED
+    assert result.result_code == "LLM_TIMEOUT"
+    assert get_terminal_payload(store, dummy_request.request_id)["result_code"] == "LLM_TIMEOUT"
 
 
 def test_duplicate_request_returns_ignored_result(orchestrator, dummy_request, store: SQLiteJobStore):
